@@ -1,0 +1,180 @@
+From 76cfd207f0c2486249caca50e93dc22940f63aab Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 7 Nov 2025 07:23:34 +0000
+Subject: [PATCH 2/2] feat: Extract ALL images from pages for Grid View
+
+- Added extractAllImages() function to extract all img tags from HTML
+- Modified crawlAndParseUrl() to download and store multiple images
+- Creates multiple assets with type LINK_BANNER_IMAGE
+- Filters out small images, tracking pixels, and data URIs
+- Limits to 10 images maximum per page
+- First image stored for backward compatibility
+- Remaining images stored as additional assets for Grid View
+---
+ apps/workers/workers/crawlerWorker.ts | 121 ++++++++++++++++++++++++--
+ 1 file changed, 114 insertions(+), 7 deletions(-)
+
+diff --git a/apps/workers/workers/crawlerWorker.ts b/apps/workers/workers/crawlerWorker.ts
+index 357ae976..6803c4e8 100644
+--- a/apps/workers/workers/crawlerWorker.ts
++++ b/apps/workers/workers/crawlerWorker.ts
+@@ -651,6 +651,82 @@ function extractReadableContent(
+   return result;
+ }
+ 
++/**
++ * Extract ALL images from HTML for Grid View support
++ * Returns array of image URLs found in the document
++ */
++function extractAllImages(
++  htmlContent: string,
++  url: string,
++  jobId: string,
++  maxImages: number = 10,
++): string[] {
++  logger.info(
++    `[Crawler][${jobId}] Will attempt to extract all images from page ...`,
++  );
++
++  const virtualConsole = new VirtualConsole();
++  virtualConsole.on("error", () => {
++    /* suppress errors */
++  });
++
++  const dom = new JSDOM(htmlContent, { url, virtualConsole });
++  const images: string[] = [];
++
++  try {
++    const document = dom.window.document;
++
++    // Get all img tags
++    const imgElements = document.querySelectorAll("img");
++
++    for (const img of imgElements) {
++      const src = img.src;
++
++      // Skip invalid URLs (data URIs, small tracking pixels, etc)
++      if (
++        !src ||
++        src.startsWith("data:") ||
++        src.includes("spacer.gif") ||
++        src.includes("pixel.gif") ||
++        src.includes("tracking")
++      ) {
++        continue;
++      }
++
++      // Skip very small images (likely icons or tracking pixels)
++      const width = img.width || parseInt(img.getAttribute("width") || "0");
++      const height = img.height || parseInt(img.getAttribute("height") || "0");
++      if ((width > 0 && width < 100) || (height > 0 && height < 100)) {
++        continue;
++      }
++
++      // Convert relative URLs to absolute
++      try {
++        const absoluteUrl = new URL(src, url).toString();
++        if (!images.includes(absoluteUrl)) {
++          images.push(absoluteUrl);
++        }
++      } catch {
++        // Skip invalid URLs
++        continue;
++      }
++
++      // Limit number of images
++      if (images.length >= maxImages) {
++        break;
++      }
++    }
++
++    logger.info(
++      `[Crawler][${jobId}] Found ${images.length} images in the page.`,
++    );
++  } finally {
++    dom.window.close();
++  }
++
++  return images;
++}
++
+ async function storeScreenshot(
+   screenshot: Buffer | undefined,
+   userId: string,
+@@ -1106,25 +1182,43 @@ async function crawlAndParseUrl(
+     jobId,
+   );
+   abortSignal.throwIfAborted();
+-  let imageAssetInfo: DBAssetType | null = null;
+-  if (meta.image) {
++
++  // NEW: Extract ALL images for Grid View support
++  const allImages = extractAllImages(htmlContent, browserUrl, jobId);
++
++  // Create assets for all images (up to 10)
++  const imageAssets: DBAssetType[] = [];
++
++  for (const imageUrl of allImages) {
++    abortSignal.throwIfAborted();
++
+     const downloaded = await downloadAndStoreImage(
+-      meta.image,
++      imageUrl,
+       userId,
+       jobId,
+       abortSignal,
+     );
++
+     if (downloaded) {
+-      imageAssetInfo = {
++      imageAssets.push({
+         id: downloaded.assetId,
+         bookmarkId,
+         userId,
+         assetType: AssetTypes.LINK_BANNER_IMAGE,
+         contentType: downloaded.contentType,
+         size: downloaded.size,
+-      };
++      });
+     }
+   }
++
++  logger.info(
++    `[Crawler][${jobId}] Successfully downloaded ${imageAssets.length} images`,
++  );
++
++  // Keep the first image as imageAssetInfo for backward compatibility
++  const imageAssetInfo: DBAssetType | null =
++    imageAssets.length > 0 ? imageAssets[0] : null;
++
+   abortSignal.throwIfAborted();
+ 
+   const parseDate = (date: string | undefined) => {
+@@ -1184,9 +1278,22 @@ async function crawlAndParseUrl(
+       );
+       assetDeletionTasks.push(silentDeleteAsset(userId, oldScreenshotAssetId));
+     }
+-    if (imageAssetInfo) {
+-      await updateAsset(oldImageAssetId, imageAssetInfo, txn);
++
++    // NEW: Save ALL images for Grid View support
++    if (imageAssets.length > 0) {
++      // Save the first image (backward compatibility - update existing asset)
++      await updateAsset(oldImageAssetId, imageAssets[0], txn);
+       assetDeletionTasks.push(silentDeleteAsset(userId, oldImageAssetId));
++
++      // Save remaining images as new assets
++      for (let i = 1; i < imageAssets.length; i++) {
++        const imageAsset = imageAssets[i];
++        await updateAsset(undefined, imageAsset, txn);
++      }
++
++      logger.info(
++        `[Crawler][${jobId}] Saved ${imageAssets.length} banner images to database`,
++      );
+     }
+     if (htmlContentAssetInfo.result === "stored") {
+       await updateAsset(
+-- 
+2.43.0
+

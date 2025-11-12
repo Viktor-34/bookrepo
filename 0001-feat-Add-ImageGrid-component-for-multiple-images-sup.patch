@@ -1,0 +1,343 @@
+From 80415eea19de3615186d9acaa180b1a85823b317 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 7 Nov 2025 07:12:45 +0000
+Subject: [PATCH 1/2] feat: Add ImageGrid component for multiple images support
+
+- Created ImageGrid.tsx component with support for 1/2/3/4+ images
+- Added getBookmarkLinkImages() function to get all banner images
+- Modified LinkCard.tsx to use ImageGrid for multiple images
+- Implemented responsive layouts:
+  * 1 image: full-width
+  * 2 images: two columns
+  * 3 images: 2 on top, 1 on bottom
+  * 4+ images: 2x2 grid with 'Show N more' button
+- Added lightbox (Dialog) for fullscreen image viewing
+- Backward compatible with existing single image bookmarks
+---
+ .../dashboard/bookmarks/LinkCard.tsx          |  42 ++--
+ apps/web/components/ui/ImageGrid.tsx          | 186 ++++++++++++++++++
+ packages/shared/utils/bookmarkUtils.ts        |  32 +++
+ 3 files changed, 247 insertions(+), 13 deletions(-)
+ create mode 100644 apps/web/components/ui/ImageGrid.tsx
+
+diff --git a/apps/web/components/dashboard/bookmarks/LinkCard.tsx b/apps/web/components/dashboard/bookmarks/LinkCard.tsx
+index 778166b5..d6841a5a 100644
+--- a/apps/web/components/dashboard/bookmarks/LinkCard.tsx
++++ b/apps/web/components/dashboard/bookmarks/LinkCard.tsx
+@@ -7,11 +7,13 @@ import { useUserSettings } from "@/lib/userSettings";
+ import type { ZBookmarkTypeLink } from "@karakeep/shared/types/bookmarks";
+ import {
+   getBookmarkLinkImageUrl,
++  getBookmarkLinkImages,
+   getBookmarkTitle,
+   getSourceUrl,
+   isBookmarkStillCrawling,
+ } from "@karakeep/shared/utils/bookmarkUtils";
+ 
++import { ImageGrid } from "@/components/ui/ImageGrid";
+ import { BookmarkLayoutAdaptingCard } from "./BookmarkLayoutAdaptingCard";
+ import FooterLinkURL from "./FooterLinkURL";
+ 
+@@ -49,6 +51,9 @@ function LinkImage({
+   const { onClickUrl, urlTarget } = useOnClickUrl(bookmark);
+   const link = bookmark.content;
+ 
++  // NEW: Get all images for Grid View
++  const images = getBookmarkLinkImages(bookmark);
++
+   const imgComponent = (url: string, unoptimized: boolean) => (
+     <Image
+       unoptimized={unoptimized}
+@@ -59,22 +64,28 @@ function LinkImage({
+     />
+   );
+ 
+-  const imageDetails = getBookmarkLinkImageUrl(link);
+-
+-  let img: React.ReactNode;
++  // If still crawling, show blur placeholder
+   if (isBookmarkStillCrawling(bookmark)) {
+-    img = imgComponent("/blur.avif", false);
+-  } else if (imageDetails) {
+-    img = imgComponent(imageDetails.url, !imageDetails.localAsset);
+-  } else {
+-    // No image found
+-    // A dummy white pixel for when there's no image.
+-    img = imgComponent(
+-      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdj+P///38ACfsD/QVDRcoAAAAASUVORK5CYII=",
+-      true,
++    return (
++      <Link
++        href={onClickUrl}
++        target={urlTarget}
++        rel="noreferrer"
++        className={className}
++      >
++        <div className="relative size-full flex-1">
++          {imgComponent("/blur.avif", false)}
++        </div>
++      </Link>
+     );
+   }
+ 
++  // NEW: Use ImageGrid for multiple images
++  if (images.length > 0) {
++    return <ImageGrid images={images} className={className} alt="Bookmark" />;
++  }
++
++  // Fallback: No image found - show dummy pixel
+   return (
+     <Link
+       href={onClickUrl}
+@@ -82,7 +93,12 @@ function LinkImage({
+       rel="noreferrer"
+       className={className}
+     >
+-      <div className="relative size-full flex-1">{img}</div>
++      <div className="relative size-full flex-1">
++        {imgComponent(
++          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdj+P///38ACfsD/QVDRcoAAAAASUVORK5CYII=",
++          true,
++        )}
++      </div>
+     </Link>
+   );
+ }
+diff --git a/apps/web/components/ui/ImageGrid.tsx b/apps/web/components/ui/ImageGrid.tsx
+new file mode 100644
+index 00000000..fe6c9441
+--- /dev/null
++++ b/apps/web/components/ui/ImageGrid.tsx
+@@ -0,0 +1,186 @@
++"use client";
++
++import { useState } from "react";
++import Image from "next/image";
++import { cn } from "@/lib/utils";
++import {
++  Dialog,
++  DialogContent,
++  DialogTrigger,
++} from "@/components/ui/dialog";
++
++interface ImageGridProps {
++  images: string[];
++  className?: string;
++  alt?: string;
++}
++
++/**
++ * ImageGrid component for displaying 1-4+ images in optimized layouts
++ *
++ * Layouts:
++ * - 1 image: Full width
++ * - 2 images: Two columns
++ * - 3 images: Two on top, one on bottom (spanning full width)
++ * - 4+ images: 2x2 grid with "Show N more" button for additional images
++ */
++export function ImageGrid({ images, className, alt = "Image" }: ImageGridProps) {
++  const [showAll, setShowAll] = useState(false);
++
++  if (!images || images.length === 0) {
++    return null;
++  }
++
++  const count = images.length;
++  const displayImages = showAll ? images : images.slice(0, 4);
++  const remainingCount = count - 4;
++
++  // Single image: full width
++  if (count === 1) {
++    return (
++      <div className={cn("relative w-full", className)}>
++        <ImageWithLightbox
++          src={images[0]}
++          alt={alt}
++          className="h-56 w-full rounded-t-lg object-cover"
++        />
++      </div>
++    );
++  }
++
++  // Two images: side by side
++  if (count === 2) {
++    return (
++      <div className={cn("grid grid-cols-2 gap-1", className)}>
++        {images.map((img, idx) => (
++          <ImageWithLightbox
++            key={idx}
++            src={img}
++            alt={`${alt} ${idx + 1}`}
++            className="h-56 w-full rounded-t-lg object-cover first:rounded-tr-none last:rounded-tl-none"
++          />
++        ))}
++      </div>
++    );
++  }
++
++  // Three images: 2 on top, 1 on bottom
++  if (count === 3) {
++    return (
++      <div className={cn("flex flex-col gap-1", className)}>
++        <div className="grid grid-cols-2 gap-1">
++          <ImageWithLightbox
++            src={images[0]}
++            alt={`${alt} 1`}
++            className="h-28 w-full rounded-tl-lg object-cover"
++          />
++          <ImageWithLightbox
++            src={images[1]}
++            alt={`${alt} 2`}
++            className="h-28 w-full rounded-tr-lg object-cover"
++          />
++        </div>
++        <ImageWithLightbox
++          src={images[2]}
++          alt={`${alt} 3`}
++          className="h-28 w-full object-cover"
++        />
++      </div>
++    );
++  }
++
++  // Four or more images: 2x2 grid
++  return (
++    <div className={cn("relative", className)}>
++      <div className="grid grid-cols-2 gap-1">
++        {displayImages.slice(0, 4).map((img, idx) => {
++          const isLast = idx === 3 && remainingCount > 0;
++
++          return (
++            <div key={idx} className="relative">
++              <ImageWithLightbox
++                src={img}
++                alt={`${alt} ${idx + 1}`}
++                className={cn(
++                  "h-28 w-full object-cover",
++                  idx === 0 && "rounded-tl-lg",
++                  idx === 1 && "rounded-tr-lg",
++                )}
++              />
++              {isLast && !showAll && (
++                <button
++                  onClick={() => setShowAll(true)}
++                  className="absolute inset-0 flex items-center justify-center bg-black/60 text-white transition-colors hover:bg-black/70"
++                >
++                  <span className="text-2xl font-semibold">
++                    +{remainingCount}
++                  </span>
++                </button>
++              )}
++            </div>
++          );
++        })}
++      </div>
++
++      {showAll && remainingCount > 0 && (
++        <div className="mt-1 grid grid-cols-2 gap-1">
++          {images.slice(4).map((img, idx) => (
++            <ImageWithLightbox
++              key={idx + 4}
++              src={img}
++              alt={`${alt} ${idx + 5}`}
++              className="h-28 w-full object-cover"
++            />
++          ))}
++        </div>
++      )}
++    </div>
++  );
++}
++
++/**
++ * Image with lightbox functionality
++ */
++function ImageWithLightbox({
++  src,
++  alt,
++  className,
++}: {
++  src: string;
++  alt: string;
++  className?: string;
++}) {
++  const [isOpen, setIsOpen] = useState(false);
++
++  return (
++    <Dialog open={isOpen} onOpenChange={setIsOpen}>
++      <DialogTrigger asChild>
++        <button
++          className={cn("relative overflow-hidden", className)}
++          onClick={() => setIsOpen(true)}
++        >
++          <Image
++            src={src}
++            alt={alt}
++            fill
++            sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
++            className="transition-transform hover:scale-105"
++            unoptimized={!src.startsWith("/") && !src.startsWith("http://localhost")}
++          />
++        </button>
++      </DialogTrigger>
++      <DialogContent className="max-h-[90vh] max-w-[90vw] overflow-hidden p-0">
++        <div className="relative h-full w-full">
++          <Image
++            src={src}
++            alt={alt}
++            width={1200}
++            height={800}
++            className="h-auto w-full object-contain"
++            unoptimized={!src.startsWith("/") && !src.startsWith("http://localhost")}
++          />
++        </div>
++      </DialogContent>
++    </Dialog>
++  );
++}
+diff --git a/packages/shared/utils/bookmarkUtils.ts b/packages/shared/utils/bookmarkUtils.ts
+index 9d4659b1..fdc2a9f0 100644
+--- a/packages/shared/utils/bookmarkUtils.ts
++++ b/packages/shared/utils/bookmarkUtils.ts
+@@ -27,6 +27,38 @@ export function getBookmarkLinkImageUrl(bookmark: ZBookmarkedLink) {
+   };
+ }
+ 
++/**
++ * Get all banner images for a bookmark (supports multiple images for Grid View)
++ * Returns an array of image URLs from:
++ * 1. All assets with type "bannerImage"
++ * 2. Fallback to imageAssetId if no banner images found
++ * 3. Fallback to external imageUrl if no local assets found
++ */
++export function getBookmarkLinkImages(
++  bookmark: ZBookmark & { content: ZBookmarkedLink },
++): string[] {
++  const images: string[] = [];
++
++  // Get all banner image assets
++  const bannerImages = bookmark.assets.filter(
++    (asset) => asset.assetType === "bannerImage",
++  );
++
++  if (bannerImages.length > 0) {
++    // Use banner images
++    return bannerImages.map((asset) => getAssetUrl(asset.id));
++  }
++
++  // Fallback: use imageAssetId or imageUrl (for backward compatibility)
++  if (bookmark.content.imageAssetId) {
++    images.push(getAssetUrl(bookmark.content.imageAssetId));
++  } else if (bookmark.content.imageUrl) {
++    images.push(bookmark.content.imageUrl);
++  }
++
++  return images;
++}
++
+ export function isBookmarkStillCrawling(bookmark: ZBookmark) {
+   return (
+     bookmark.content.type == BookmarkTypes.LINK && !bookmark.content.crawledAt
+-- 
+2.43.0
+

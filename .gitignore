@@ -1,0 +1,17 @@
+# Karakeep source repository (cloned, not part of our project)
+karakeep-source/
+
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
